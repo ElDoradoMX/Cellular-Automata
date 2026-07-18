@@ -192,6 +192,12 @@
         <option value="neon">Neon pulse (by age)</option>
       </select>
       <p class="hint">Hue/brightness track each cell's generation age, not just on/off state.</p>
+
+      <div class="slider-row" style="margin-top:12px;">
+        <div class="top"><label class="field-label">Trail length</label><span class="val" id="trailVal">20</span></div>
+        <input type="range" id="trailSlider" min="0" max="120" value="20">
+      </div>
+      <p class="hint">Afterglow left behind by cells that just died, fading to background over N frames. 0 = off. (Life-like &amp; Brian's Brain only.)</p>
     </div>
 
     <!-- SEEDING -->
@@ -297,6 +303,7 @@ class GridState {
     this.rows = rows;
     this.cells = new Uint8Array(cols * rows);   // cell value (0..N per rule family)
     this.ages  = new Uint16Array(cols * rows);  // frames-since-changed, used for color grading
+    this.trails = new Uint8Array(cols * rows);  // fade-out intensity for recently-dead cells
     this.generation = 0;
   }
   idx(x, y) { return y * this.cols + x; }
@@ -313,6 +320,7 @@ class GridState {
   clear() {
     this.cells.fill(0);
     this.ages.fill(0);
+    this.trails.fill(0);
     this.generation = 0;
   }
   resize(cols, rows) {
@@ -320,6 +328,7 @@ class GridState {
     this.cols = cols; this.rows = rows;
     this.cells = new Uint8Array(cols * rows);
     this.ages  = new Uint16Array(cols * rows);
+    this.trails = new Uint8Array(cols * rows);
     this.generation = 0;
   }
 }
@@ -486,48 +495,71 @@ const Renderer = {
     this.imgData = this.offCtx.createImageData(cols, rows);
   },
 
-  // color scheme functions: (value, age, maxAge) -> [r,g,b]
+  // Each scheme: bg (off-cell color), trailColor (afterglow target color for
+  // cells that recently died), and color(value, age) for live/dying cells.
   schemes: {
-    mono(value, age) {
-      if (value === 0) return [0, 0, 0];
-      if (value === 2) return [70, 70, 78]; // dying state (Brian's Brain) dimmed
-      const t = Math.min(age / 40, 1);
-      const b = 255 - t * 140;
-      return [b, b, b];
+    mono: {
+      bg: [0, 0, 0],
+      trailColor: [190, 190, 190],
+      color(value, age) {
+        if (value === 2) return [70, 70, 78]; // Brian's Brain "dying" state
+        const t = Math.min(age / 40, 1);
+        const b = 255 - t * 140;
+        return [b, b, b];
+      }
     },
-    thermal(value, age) {
-      if (value === 0) return [6, 7, 10];
-      if (value === 2) return [70, 30, 90];
-      const t = Math.min(age / 60, 1);
-      // deep blue -> magenta -> orange -> pale yellow
-      const stops = [
-        [15, 20, 120], [130, 20, 140], [230, 90, 40], [255, 220, 120]
-      ];
-      const seg = t * (stops.length - 1);
-      const i0 = Math.floor(seg), i1 = Math.min(i0 + 1, stops.length - 1);
-      const f = seg - i0;
-      return [
-        stops[i0][0] + (stops[i1][0] - stops[i0][0]) * f,
-        stops[i0][1] + (stops[i1][1] - stops[i0][1]) * f,
-        stops[i0][2] + (stops[i1][2] - stops[i0][2]) * f,
-      ];
+    thermal: {
+      bg: [6, 7, 10],
+      trailColor: [200, 70, 30],
+      color(value, age) {
+        if (value === 2) return [130, 30, 90];
+        const t = Math.min(age / 60, 1);
+        // deep blue -> magenta -> orange -> pale yellow
+        const stops = [
+          [15, 20, 120], [130, 20, 140], [230, 90, 40], [255, 220, 120]
+        ];
+        const seg = t * (stops.length - 1);
+        const i0 = Math.floor(seg), i1 = Math.min(i0 + 1, stops.length - 1);
+        const f = seg - i0;
+        return [
+          stops[i0][0] + (stops[i1][0] - stops[i0][0]) * f,
+          stops[i0][1] + (stops[i1][1] - stops[i0][1]) * f,
+          stops[i0][2] + (stops[i1][2] - stops[i0][2]) * f,
+        ];
+      }
     },
-    neon(value, age) {
-      if (value === 0) return [4, 6, 9];
-      if (value === 2) return [255, 60, 180];
-      const t = Math.min(age / 50, 1);
-      const hue = (160 + t * 140) % 360; // cyan -> violet
-      return hslToRgb(hue, 0.85, 0.55 - t * 0.15);
+    neon: {
+      bg: [4, 6, 9],
+      trailColor: [120, 200, 255],
+      color(value, age) {
+        if (value === 2) return [255, 60, 180];
+        const t = Math.min(age / 50, 1);
+        const hue = (160 + t * 140) % 360; // cyan -> violet
+        return hslToRgb(hue, 0.85, 0.55 - t * 0.15);
+      }
     }
   },
 
-  draw(state, schemeName) {
-    const { cols, rows, cells, ages } = state;
+  draw(state, schemeName, trailMax) {
+    const { cols, rows, cells, ages, trails } = state;
     if (this.offCanvas.width !== cols || this.offCanvas.height !== rows) this.init(cols, rows);
     const scheme = this.schemes[schemeName] || this.schemes.mono;
     const data = this.imgData.data;
+    const useTrails = trailMax > 0;
     for (let i = 0; i < cells.length; i++) {
-      const [r, g, b] = scheme(cells[i], ages[i]);
+      let r, g, b;
+      if (cells[i] !== 0) {
+        [r, g, b] = scheme.color(cells[i], ages[i]);
+      } else if (useTrails && trails[i] > 0) {
+        // afterglow: blend from background toward the trail color, fading
+        // out as trails[i] counts down to 0.
+        const t = trails[i] / trailMax;
+        r = scheme.bg[0] + (scheme.trailColor[0] - scheme.bg[0]) * t;
+        g = scheme.bg[1] + (scheme.trailColor[1] - scheme.bg[1]) * t;
+        b = scheme.bg[2] + (scheme.trailColor[2] - scheme.bg[2]) * t;
+      } else {
+        [r, g, b] = scheme.bg;
+      }
       const p = i * 4;
       data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = 255;
     }
@@ -679,6 +711,7 @@ const Sim = {
   running: true,
   suppressAutoFit: false,
   stepsPerSec: 12,
+  trailLength: 20, // frames a dead cell's afterglow takes to fade to background; 0 = off
   accumulator: 0,
   lastTime: 0,
   fpsAccum: 0, fpsFrames: 0, fpsLast: 0,
@@ -691,9 +724,15 @@ const Sim = {
       this.canvas,
       () => this.state,
       () => this.cellSize,
-      () => Renderer.draw(this.state, this.colorScheme)
+      () => this.redraw()
     );
     requestAnimationFrame((t) => this.loop(t));
+  },
+
+  // Single place that knows how to re-render the current state — keeps every
+  // call site in sync with the active color scheme AND trail length.
+  redraw() {
+    Renderer.draw(this.state, this.colorScheme, this.trailLength);
   },
 
   resizeCanvas() {
@@ -728,7 +767,7 @@ const Sim = {
     if (cfg.family === 'elementary' && cfg.ruleNumber != null) this.elementaryRuleNumber = cfg.ruleNumber;
     if (this.family === 'elementary') this.seedElementary();
     else this.state.clear();
-    Renderer.draw(this.state, this.colorScheme);
+    this.redraw();
   },
 
   // --- full state: grid + rule + view, JSON-serializable -------------------
@@ -741,6 +780,7 @@ const Sim = {
       cellSize: this.cellSize,
       colorScheme: this.colorScheme,
       stepsPerSec: this.stepsPerSec,
+      trailLength: this.trailLength,
       cols: s.cols,
       rows: s.rows,
       generation: s.generation,
@@ -757,6 +797,7 @@ const Sim = {
     this.cellSize = obj.cellSize || this.cellSize;
     this.colorScheme = obj.colorScheme || this.colorScheme;
     this.stepsPerSec = obj.stepsPerSec || this.stepsPerSec;
+    this.trailLength = obj.trailLength != null ? obj.trailLength : this.trailLength;
     if (obj.family === 'life' && obj.bs) this.bs = RuleEngine.parseBS(obj.bs);
     if (obj.family === 'elementary' && obj.ruleNumber != null) this.elementaryRuleNumber = obj.ruleNumber;
 
@@ -764,6 +805,9 @@ const Sim = {
     this.state = new GridState(cols, rows);
     this.state.cells.set(base64ToU8(obj.cells));
     this.state.generation = obj.generation || 0;
+    // Note: trails are an ephemeral decaying visual effect, not core sim
+    // data — they intentionally reset to empty on load rather than being
+    // serialized, so a loaded state starts with a clean (non-fading) frame.
 
     this.suppressAutoFit = true;
     this.canvas.width = cols * this.cellSize;
@@ -777,7 +821,7 @@ const Sim = {
       this.elementaryLastRow = this.state.cells.slice(base, base + cols);
     }
 
-    Renderer.draw(this.state, this.colorScheme);
+    this.redraw();
     syncUIFromSim();
   },
 
@@ -785,7 +829,7 @@ const Sim = {
     this.family = family;
     if (family === 'elementary') this.seedElementary();
     else this.state.clear();
-    Renderer.draw(this.state, this.colorScheme);
+    this.redraw();
   },
 
   seedElementary() {
@@ -812,13 +856,13 @@ const Sim = {
         this.state.cells[i] = Math.random() * 100 < densityPct ? 1 : 0;
       }
     }
-    Renderer.draw(this.state, this.colorScheme);
+    this.redraw();
   },
 
   clear() {
     this.state.clear();
     if (this.family === 'elementary') this.elementaryLastRow = new Uint8Array(this.state.cols);
-    Renderer.draw(this.state, this.colorScheme);
+    this.redraw();
   },
 
   step() {
@@ -840,11 +884,16 @@ const Sim = {
 
   commit2D(nextCells) {
     const s = this.state;
+    const trailLen = this.trailLength;
     for (let i = 0; i < nextCells.length; i++) {
+      const wasAlive = s.cells[i] !== 0;
       if (nextCells[i]) {
-        s.ages[i] = s.cells[i] ? Math.min(s.ages[i] + 1, 4000) : 0;
+        s.ages[i] = wasAlive ? Math.min(s.ages[i] + 1, 4000) : 0;
+        s.trails[i] = 0; // no afterglow while a cell is alive
       } else {
         s.ages[i] = 0;
+        if (wasAlive && trailLen > 0) s.trails[i] = trailLen;       // just died — start the fade
+        else if (s.trails[i] > 0) s.trails[i]--;                     // continue fading
       }
     }
     s.cells = nextCells;
@@ -870,7 +919,7 @@ const Sim = {
         this.accumulator -= interval;
         steps++;
       }
-      if (steps > 0) Renderer.draw(this.state, this.colorScheme);
+      if (steps > 0) this.redraw();
     }
     Renderer.present(this.ctx, this.canvas);
     requestAnimationFrame((tt) => this.loop(tt));
@@ -908,6 +957,8 @@ function syncUIFromSim() {
   $('speedVal').textContent = Sim.stepsPerSec + '/s';
 
   $('colorScheme').value = Sim.colorScheme;
+  $('trailSlider').value = Sim.trailLength;
+  $('trailVal').textContent = Sim.trailLength;
 
   document.getElementById('genCount').textContent = Sim.state.generation;
 }
@@ -984,7 +1035,7 @@ function wireUI() {
 
   // Play / step / reset
   $('playBtn').addEventListener('click', togglePlay);
-  $('stepBtn').addEventListener('click', () => { Sim.step(); Renderer.draw(Sim.state, Sim.colorScheme); });
+  $('stepBtn').addEventListener('click', () => { Sim.step(); Sim.redraw(); });
   $('resetBtn').addEventListener('click', () => Sim.clear());
 
   function togglePlay() {
@@ -995,7 +1046,12 @@ function wireUI() {
   // Color
   $('colorScheme').addEventListener('change', (e) => {
     Sim.colorScheme = e.target.value;
-    Renderer.draw(Sim.state, Sim.colorScheme);
+    Sim.redraw();
+  });
+  $('trailSlider').addEventListener('input', (e) => {
+    Sim.trailLength = Number(e.target.value);
+    $('trailVal').textContent = e.target.value;
+    Sim.redraw();
   });
 
   // Randomize / clear
