@@ -233,7 +233,10 @@
       <p class="hint" style="margin-top:0;">Seeds the grid from a picture — pixels brighter than the threshold become live cells.</p>
       <div class="btn-row" style="margin-top:8px;">
         <button id="chooseImageBtn">Choose image…</button>
-        <button id="clearImageBtn" class="danger" style="display:none;">Remove</button>
+        <button id="resampleImageBtn" disabled>Resample</button>
+      </div>
+      <div class="btn-row" id="removeImageRow" style="display:none; margin-top:8px;">
+        <button id="clearImageBtn" class="danger">Remove image</button>
       </div>
       <input type="file" id="imageFileInput" accept="image/*" style="display:none;">
       <p class="hint" id="imageStatus" style="margin-top:6px;">No image loaded.</p>
@@ -256,6 +259,18 @@
         <label class="field-label">Invert (dark = alive)</label>
         <input type="checkbox" id="imgInvert">
       </div>
+
+      <div class="row" style="margin-top:10px;">
+        <label class="field-label">Pause sim when (re)seeded</label>
+        <input type="checkbox" id="imgPauseOnSeed" checked>
+      </div>
+      <p class="hint" style="margin-top:2px;">Keeps the image on screen instead of it evolving away the instant it's applied.</p>
+
+      <div class="slider-row" style="margin-top:12px;">
+        <div class="top"><label class="field-label">Continuous feed</label><span class="val" id="imageFeedVal">Off</span></div>
+        <input type="range" id="imageFeedSlider" min="0" max="60" value="0">
+      </div>
+      <p class="hint">Re-injects the image's live cells every N generations while running, instead of a single one-time seed — a steady "light source" the automaton keeps reacting to. 0 = off.</p>
     </div>
 
     <!-- DRAWING -->
@@ -828,6 +843,10 @@ const Sim = {
   colorScheme: 'thermal',
   customStops: ['#0a0a1e', '#2a5b9c', '#ff2fb0', '#fef6c9'],
   lastImage: null, // currently loaded <img>, if any — used to re-sample live as controls change
+  imageOpts: { fit: 'cover', threshold: 0.5, invert: false },
+  pauseOnImageSeed: true,
+  imageFeedInterval: 0, // 0 = one-shot seed only; >0 = re-inject the image every N generations
+  imageFeedCounter: 0,
   running: true,
   suppressAutoFit: false,
   stepsPerSec: 12,
@@ -1005,12 +1024,15 @@ const Sim = {
 
   // Seeds the grid from an already-loaded <img>, using ImageInput.sampleBinary
   // at the current grid resolution. Re-callable cheaply, so the UI can
-  // re-sample live as the threshold/invert/fit controls change.
+  // re-sample live as the threshold/invert/fit controls change, or via an
+  // explicit "Resample" button without re-uploading anything.
   seedFromImage(img, opts) {
     if (!img) return;
+    this.imageOpts = opts;
     const cols = this.state.cols, rows = this.state.rows;
     const binary = ImageInput.sampleBinary(img, cols, rows, opts);
     this.state.clear();
+    this.imageFeedCounter = 0;
     if (this.family === 'elementary') {
       const base = cols * (rows - 1);
       const row = binary.slice(base, base + cols);
@@ -1020,6 +1042,23 @@ const Sim = {
       this.state.cells.set(binary);
     }
     this.redraw();
+    if (this.pauseOnImageSeed) this.running = false; // let it sit before it evolves away
+  },
+
+  // Non-destructive variant used by the continuous-feed loop: ORs the
+  // image's live cells into whatever the simulation currently looks like,
+  // instead of replacing the grid — a sustained "light source" the
+  // automaton keeps reacting to rather than a one-time reset.
+  stampFromImage(img, opts) {
+    if (!img) return;
+    const cols = this.state.cols, rows = this.state.rows;
+    const binary = ImageInput.sampleBinary(img, cols, rows, opts);
+    if (this.family === 'elementary') {
+      const base = cols * (rows - 1);
+      this.elementaryLastRow = binary.slice(base, base + cols);
+    } else {
+      for (let i = 0; i < binary.length; i++) if (binary[i]) this.state.cells[i] = 1;
+    }
   },
 
   step() {
@@ -1037,6 +1076,16 @@ const Sim = {
     }
     s.generation++;
     document.getElementById('genCount').textContent = s.generation;
+
+    // Continuous image feed: periodically re-inject the loaded image's live
+    // cells so it acts as a sustained input rather than a one-shot seed.
+    if (this.lastImage && this.imageFeedInterval > 0) {
+      this.imageFeedCounter++;
+      if (this.imageFeedCounter >= this.imageFeedInterval) {
+        this.imageFeedCounter = 0;
+        this.stampFromImage(this.lastImage, this.imageOpts);
+      }
+    }
   },
 
   commit2D(nextCells) {
@@ -1221,6 +1270,9 @@ function wireUI() {
 
   function togglePlay() {
     Sim.running = !Sim.running;
+    syncPlayButton();
+  }
+  function syncPlayButton() {
     $('playBtn').textContent = Sim.running ? 'Pause' : 'Play';
   }
 
@@ -1266,11 +1318,17 @@ function wireUI() {
 
   // Image input — static image -> initial cell states
   function imageOpts() {
-    return {
+    const opts = {
       fit: $('imageFit').value,
       threshold: Number($('imgThresholdSlider').value) / 100,
       invert: $('imgInvert').checked,
     };
+    Sim.imageOpts = opts; // keep Sim's copy current so the continuous-feed loop in step() sees live values
+    return opts;
+  }
+  function seedFromImageAndSync() {
+    Sim.seedFromImage(Sim.lastImage, imageOpts());
+    syncPlayButton(); // seedFromImage may auto-pause
   }
   $('chooseImageBtn').addEventListener('click', () => $('imageFileInput').click());
   $('imageFileInput').addEventListener('change', (e) => {
@@ -1280,25 +1338,34 @@ function wireUI() {
     ImageInput.loadFile(file, (img) => {
       if (!img) { $('imageStatus').textContent = "Couldn't load that image."; return; }
       Sim.lastImage = img;
-      Sim.seedFromImage(img, imageOpts());
+      seedFromImageAndSync();
       $('imageStatus').textContent = `Loaded ${file.name} (${img.width}×${img.height}).`;
-      $('clearImageBtn').style.display = 'block';
+      $('resampleImageBtn').disabled = false;
+      $('removeImageRow').style.display = 'flex';
     });
     e.target.value = ''; // allow re-choosing the same file later
   });
+  $('resampleImageBtn').addEventListener('click', () => { if (Sim.lastImage) seedFromImageAndSync(); });
   $('clearImageBtn').addEventListener('click', () => {
     Sim.lastImage = null;
-    $('clearImageBtn').style.display = 'none';
+    $('resampleImageBtn').disabled = true;
+    $('removeImageRow').style.display = 'none';
     $('imageStatus').textContent = 'No image loaded.';
   });
   // Fit / threshold / invert re-sample live if an image is already loaded —
   // no need to re-upload just to try a different threshold.
-  $('imageFit').addEventListener('change', () => { if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts()); });
+  $('imageFit').addEventListener('change', () => { if (Sim.lastImage) seedFromImageAndSync(); });
   $('imgThresholdSlider').addEventListener('input', (e) => {
     $('imgThresholdVal').textContent = e.target.value + '%';
-    if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts());
+    if (Sim.lastImage) seedFromImageAndSync();
   });
-  $('imgInvert').addEventListener('change', () => { if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts()); });
+  $('imgInvert').addEventListener('change', () => { if (Sim.lastImage) seedFromImageAndSync(); });
+  $('imgPauseOnSeed').addEventListener('change', (e) => { Sim.pauseOnImageSeed = e.target.checked; });
+  $('imageFeedSlider').addEventListener('input', (e) => {
+    Sim.imageFeedInterval = Number(e.target.value);
+    Sim.imageFeedCounter = 0;
+    $('imageFeedVal').textContent = Sim.imageFeedInterval === 0 ? 'Off' : `every ${Sim.imageFeedInterval}`;
+  });
 
   // Brush
   $('brushSlider').addEventListener('input', (e) => {
