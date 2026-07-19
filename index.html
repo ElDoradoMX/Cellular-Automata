@@ -69,6 +69,7 @@
     border-radius:6px; padding:6px 8px; font-size:12px; width:100%; outline:none;
   }
   select:focus, input[type=text]:focus, input[type=number]:focus{ border-color:var(--accent-dim); }
+  input[type=checkbox]{ accent-color:var(--accent); width:16px; height:16px; cursor:pointer; }
   input[type=range]{
     -webkit-appearance:none; width:100%; height:4px; border-radius:2px;
     background:var(--control-border); outline:none;
@@ -94,6 +95,15 @@
   button.primary:hover{ opacity:.9; color:#04140f; }
   button.danger:hover{ border-color:#5c2b27; color:var(--danger); }
   button.icon{ flex:0 0 auto; width:34px; padding:8px 0; }
+  input[type=color].swatch{
+    -webkit-appearance:none; appearance:none;
+    width:34px; height:34px; padding:0; border:2px solid var(--control-border);
+    border-radius:7px; background:none; cursor:pointer; flex:0 0 auto;
+  }
+  input[type=color].swatch::-webkit-color-swatch-wrapper{ padding:2px; }
+  input[type=color].swatch::-webkit-color-swatch{ border:none; border-radius:4px; }
+  input[type=color].swatch::-moz-color-swatch{ border:none; border-radius:4px; }
+  input[type=color].swatch:hover{ border-color:var(--accent-dim); }
   .toggle-group{ display:flex; border:1px solid var(--control-border); border-radius:6px; overflow:hidden; }
   .toggle-group button{ flex:1; border:none; border-radius:0; background:var(--control-bg); }
   .toggle-group button.active{ background:var(--accent-dim); color:var(--accent); }
@@ -185,13 +195,18 @@
 
     <!-- COLOR -->
     <div class="group">
-      <div class="row"><label class="field-label">Color scheme</label></div>
-      <select id="colorScheme">
-        <option value="mono">Monochrome</option>
-        <option value="thermal" selected>Thermal (by age)</option>
-        <option value="neon">Neon pulse (by age)</option>
-      </select>
-      <p class="hint">Hue/brightness track each cell's generation age, not just on/off state.</p>
+      <div class="row"><label class="field-label">Palette (Gradient Map)</label></div>
+      <select id="colorScheme"></select>
+      <p class="hint">Each live cell's age (0 up to ~55 frames, then it caps) sets its position along this palette's gradient — swap the palette and every cell remaps at once.</p>
+
+      <div id="customPaletteRow" style="display:none; margin-top:10px; flex-direction:column; gap:8px;">
+        <div id="customSwatches" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
+        <div class="btn-row">
+          <button id="addStopBtn" class="icon" title="Add color stop">+</button>
+          <button id="removeStopBtn" class="icon" title="Remove last stop">−</button>
+        </div>
+        <p class="hint" style="margin:0;">Click a swatch to change its color. Left → right is dark → light along the gradient.</p>
+      </div>
 
       <div class="slider-row" style="margin-top:12px;">
         <div class="top"><label class="field-label">Trail length</label><span class="val" id="trailVal">20</span></div>
@@ -209,6 +224,37 @@
       <div class="btn-row">
         <button id="randomizeBtn">Randomize</button>
         <button id="clearBtn" class="danger">Clear</button>
+      </div>
+    </div>
+
+    <!-- IMAGE INPUT (static image -> initial cell states) -->
+    <div class="group">
+      <div class="row"><label class="field-label">Image input</label></div>
+      <p class="hint" style="margin-top:0;">Seeds the grid from a picture — pixels brighter than the threshold become live cells.</p>
+      <div class="btn-row" style="margin-top:8px;">
+        <button id="chooseImageBtn">Choose image…</button>
+        <button id="clearImageBtn" class="danger" style="display:none;">Remove</button>
+      </div>
+      <input type="file" id="imageFileInput" accept="image/*" style="display:none;">
+      <p class="hint" id="imageStatus" style="margin-top:6px;">No image loaded.</p>
+
+      <div class="row" style="margin-top:10px;">
+        <label class="field-label">Fit</label>
+        <select id="imageFit" style="width:auto; flex:0 0 auto;">
+          <option value="cover" selected>Cover (crop to fill)</option>
+          <option value="contain">Contain (letterbox)</option>
+          <option value="stretch">Stretch</option>
+        </select>
+      </div>
+
+      <div class="slider-row" style="margin-top:10px;">
+        <div class="top"><label class="field-label">Brightness threshold</label><span class="val" id="imgThresholdVal">50%</span></div>
+        <input type="range" id="imgThresholdSlider" min="0" max="100" value="50">
+      </div>
+
+      <div class="row" style="margin-top:8px;">
+        <label class="field-label">Invert (dark = alive)</label>
+        <input type="checkbox" id="imgInvert">
       </div>
     </div>
 
@@ -479,14 +525,76 @@ const LIFE_PRESETS = {
 };
 
 // ---------------------------------------------------------------------------
-// Renderer — draws an arbitrary (cells, ages) buffer pair to the canvas.
-// Decoupled from simulation: could just as well render a buffer that was
-// populated by a video/camera input source rather than the Sim below.
+// Palettes — Gradient Maps. Each cell's "shade of gray" (its age, normalized
+// to 0..1) is looked up through a palette's color stops, exactly like a
+// Photoshop-style Gradient Map: the grayscale ramp is fixed, only the
+// palette changes what color each gray level becomes.
+//
+// To add a new palette: add one entry here (a name + an array of [r,g,b]
+// stops, evenly spaced along 0..1). No other code needs to change — the
+// renderer, UI dropdown, and save/share serialization all pick it up
+// automatically via PALETTE_ORDER below.
+// ---------------------------------------------------------------------------
+const Palettes = {
+  mono:      { label: 'Grayscale',    stops: [[0,0,0], [255,255,255]] },
+  thermal:   { label: 'Thermal',      stops: [[15,20,120], [130,20,140], [230,90,40], [255,220,120]] },
+  neon:      { label: 'Neon Pulse',   stops: [[8,8,18], [0,180,255], [150,60,255], [255,60,200]] },
+  sunset:    { label: 'Sunset',       stops: [[20,10,40], [120,20,90], [230,80,60], [255,205,90]] },
+  ice:       { label: 'Ice',          stops: [[5,10,25], [20,75,120], [100,205,230], [240,250,255]] },
+  forest:    { label: 'Forest',       stops: [[5,15,10], [20,80,40], [110,170,60], [230,240,160]] },
+  infrared:  { label: 'Infrared',     stops: [[0,0,0], [90,0,110], [210,20,40], [255,180,40], [255,255,230]] },
+  vaporwave: { label: 'Vaporwave',    stops: [[15,10,45], [130,30,180], [255,80,200], [140,230,255]] },
+  custom:    { label: 'Custom…',      stops: [[0,0,0], [255,255,255]] }, // stops replaced live from user input
+};
+const PALETTE_ORDER = ['mono','thermal','neon','sunset','ice','forest','infrared','vaporwave','custom'];
+
+// Evenly-spaced multi-stop linear interpolation: t in [0,1] -> [r,g,b].
+function sampleGradient(stops, t) {
+  t = Math.max(0, Math.min(1, t));
+  const n = stops.length - 1;
+  const seg = t * n;
+  const i0 = Math.floor(seg);
+  const i1 = Math.min(i0 + 1, n);
+  const f = seg - i0;
+  const a = stops[i0], b = stops[i1];
+  return [
+    a[0] + (b[0] - a[0]) * f,
+    a[1] + (b[1] - a[1]) * f,
+    a[2] + (b[2] - a[2]) * f,
+  ];
+}
+
+function hexToRgb(hex) {
+  hex = hex.trim().replace(/^#/, '');
+  if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+  const num = parseInt(hex, 16);
+  if (Number.isNaN(num) || hex.length !== 6) return null;
+  return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+}
+
+function rgbToHex([r, g, b]) {
+  const c = n => Math.round(Math.max(0, Math.min(255, n))).toString(16).padStart(2, '0');
+  return '#' + c(r) + c(g) + c(b);
+}
+
+// Parses a comma-separated hex list ("#0a0a1e, #ff2fb0, #fef6c9") into stops.
+function parseCustomStops(str) {
+  const parts = (str || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+  const stops = parts.map(hexToRgb);
+  return stops.every(Boolean) ? stops : null;
+}
+
+// ---------------------------------------------------------------------------
+// Renderer — draws an arbitrary (cells, ages, trails) buffer set to the
+// canvas. Decoupled from simulation: could just as well render a buffer that
+// was populated by a video/camera input source rather than the Sim below.
 // ---------------------------------------------------------------------------
 const Renderer = {
   offCanvas: document.createElement('canvas'),
   offCtx: null,
   imgData: null,
+  ageDivisor: 55, // frames of age it takes a live cell to reach the "hot" end of the gradient
 
   init(cols, rows) {
     this.offCanvas.width = cols;
@@ -495,70 +603,37 @@ const Renderer = {
     this.imgData = this.offCtx.createImageData(cols, rows);
   },
 
-  // Each scheme: bg (off-cell color), trailColor (afterglow target color for
-  // cells that recently died), and color(value, age) for live/dying cells.
-  schemes: {
-    mono: {
-      bg: [0, 0, 0],
-      trailColor: [190, 190, 190],
-      color(value, age) {
-        if (value === 2) return [70, 70, 78]; // Brian's Brain "dying" state
-        const t = Math.min(age / 40, 1);
-        const b = 255 - t * 140;
-        return [b, b, b];
-      }
-    },
-    thermal: {
-      bg: [6, 7, 10],
-      trailColor: [200, 70, 30],
-      color(value, age) {
-        if (value === 2) return [130, 30, 90];
-        const t = Math.min(age / 60, 1);
-        // deep blue -> magenta -> orange -> pale yellow
-        const stops = [
-          [15, 20, 120], [130, 20, 140], [230, 90, 40], [255, 220, 120]
-        ];
-        const seg = t * (stops.length - 1);
-        const i0 = Math.floor(seg), i1 = Math.min(i0 + 1, stops.length - 1);
-        const f = seg - i0;
-        return [
-          stops[i0][0] + (stops[i1][0] - stops[i0][0]) * f,
-          stops[i0][1] + (stops[i1][1] - stops[i0][1]) * f,
-          stops[i0][2] + (stops[i1][2] - stops[i0][2]) * f,
-        ];
-      }
-    },
-    neon: {
-      bg: [4, 6, 9],
-      trailColor: [120, 200, 255],
-      color(value, age) {
-        if (value === 2) return [255, 60, 180];
-        const t = Math.min(age / 50, 1);
-        const hue = (160 + t * 140) % 360; // cyan -> violet
-        return hslToRgb(hue, 0.85, 0.55 - t * 0.15);
-      }
-    }
-  },
-
-  draw(state, schemeName, trailMax) {
+  draw(state, paletteKey, trailMax) {
     const { cols, rows, cells, ages, trails } = state;
     if (this.offCanvas.width !== cols || this.offCanvas.height !== rows) this.init(cols, rows);
-    const scheme = this.schemes[schemeName] || this.schemes.mono;
+    const palette = Palettes[paletteKey] || Palettes.mono;
+    const stops = palette.stops;
     const data = this.imgData.data;
     const useTrails = trailMax > 0;
+
+    // Background = gray level 0 through the gradient map; afterglow target
+    // = a mid/high gray level, so dying cells fade from their live color
+    // down toward black rather than toward an unrelated fixed hue.
+    const bg = sampleGradient(stops, 0);
+    const trailColor = sampleGradient(stops, 0.55);
+
     for (let i = 0; i < cells.length; i++) {
       let r, g, b;
-      if (cells[i] !== 0) {
-        [r, g, b] = scheme.color(cells[i], ages[i]);
+      if (cells[i] === 1) {
+        const t = Math.min(ages[i] / this.ageDivisor, 1);
+        [r, g, b] = sampleGradient(stops, t);
+      } else if (cells[i] === 2) {
+        // Brian's Brain "dying" state — a fixed high-gray tone
+        [r, g, b] = sampleGradient(stops, 0.88);
       } else if (useTrails && trails[i] > 0) {
         // afterglow: blend from background toward the trail color, fading
         // out as trails[i] counts down to 0.
         const t = trails[i] / trailMax;
-        r = scheme.bg[0] + (scheme.trailColor[0] - scheme.bg[0]) * t;
-        g = scheme.bg[1] + (scheme.trailColor[1] - scheme.bg[1]) * t;
-        b = scheme.bg[2] + (scheme.trailColor[2] - scheme.bg[2]) * t;
+        r = bg[0] + (trailColor[0] - bg[0]) * t;
+        g = bg[1] + (trailColor[1] - bg[1]) * t;
+        b = bg[2] + (trailColor[2] - bg[2]) * t;
       } else {
-        [r, g, b] = scheme.bg;
+        [r, g, b] = bg;
       }
       const p = i * 4;
       data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = 255;
@@ -573,20 +648,12 @@ const Renderer = {
   }
 };
 
-function hslToRgb(h, s, l) {
-  h /= 360;
-  const k = n => (n + h * 12) % 12;
-  const a = s * Math.min(l, 1 - l);
-  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-  return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
-}
-
 // ---------------------------------------------------------------------------
 // InputSource — anything that injects values into the grid.
-// Today: mouse drawing + randomize/clear buttons.
-// FUTURE: a camera/video/image source can implement the same `paint(state)`
-// contract (e.g. mapping pixel brightness to cell state each frame) and be
-// swapped in without touching Sim or Renderer.
+// Today: mouse drawing, randomize/clear buttons, and static image sampling.
+// FUTURE: a camera/video source can implement the same sampleBinary()-style
+// contract per frame (mapping pixel brightness to cell state continuously)
+// and be swapped in without touching Sim or Renderer.
 // ---------------------------------------------------------------------------
 const MouseInput = {
   drawing: false,
@@ -625,6 +692,57 @@ const MouseInput = {
       if (this.drawing) paintAt(x, y, this.eraseMode ? 0 : 1);
     });
     canvas.addEventListener('mouseleave', () => HoverDot.hide());
+  }
+};
+
+// ---------------------------------------------------------------------------
+// ImageInput — static image -> initial cell states. Draws the source image
+// onto a cols x rows offscreen canvas (same "shrink to grid resolution"
+// trick the Renderer uses in reverse), reads pixel luma, and thresholds it
+// into a binary Uint8Array the same shape as GridState.cells.
+//
+// This is intentionally a pure sampling function with no simulation
+// knowledge — a future video/camera input source can reuse sampleBinary()
+// unchanged, calling it once per frame instead of once per upload.
+// ---------------------------------------------------------------------------
+const ImageInput = {
+  loadFile(file, onLoaded) {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { onLoaded(img); URL.revokeObjectURL(url); };
+    img.onerror = () => { URL.revokeObjectURL(url); onLoaded(null); };
+    img.src = url;
+  },
+
+  // Draws `img` into a w x h canvas per `fit` ('cover' | 'contain' | 'stretch'),
+  // matching the familiar CSS background-size semantics.
+  drawFitted(ctx, img, w, h, fit) {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+    if (fit === 'stretch') { ctx.drawImage(img, 0, 0, w, h); return; }
+    const scale = fit === 'cover'
+      ? Math.max(w / img.width, h / img.height)
+      : Math.min(w / img.width, h / img.height); // contain
+    const dw = img.width * scale, dh = img.height * scale;
+    ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  },
+
+  // Returns a cols*rows Uint8Array of 0/1, thresholded from image luma.
+  sampleBinary(img, cols, rows, { fit = 'cover', threshold = 0.5, invert = false } = {}) {
+    const off = document.createElement('canvas');
+    off.width = cols; off.height = rows;
+    const ctx = off.getContext('2d');
+    this.drawFitted(ctx, img, cols, rows, fit);
+    const data = ctx.getImageData(0, 0, cols, rows).data;
+    const out = new Uint8Array(cols * rows);
+    for (let i = 0; i < cols * rows; i++) {
+      const p = i * 4;
+      const luma = (data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114) / 255;
+      let alive = luma >= threshold;
+      if (invert) alive = !alive;
+      out[i] = alive ? 1 : 0;
+    }
+    return out;
   }
 };
 
@@ -708,6 +826,8 @@ const Sim = {
   elementaryRuleNumber: 30,
   elementaryLastRow: null,
   colorScheme: 'thermal',
+  customStops: ['#0a0a1e', '#2a5b9c', '#ff2fb0', '#fef6c9'],
+  lastImage: null, // currently loaded <img>, if any — used to re-sample live as controls change
   running: true,
   suppressAutoFit: false,
   stepsPerSec: 12,
@@ -733,6 +853,12 @@ const Sim = {
   // call site in sync with the active color scheme AND trail length.
   redraw() {
     Renderer.draw(this.state, this.colorScheme, this.trailLength);
+  },
+
+  // Pushes this.customStops (hex strings) into Palettes.custom.stops (rgb
+  // arrays) so the renderer picks up whatever the swatch editor last set.
+  syncCustomPaletteFromStops() {
+    Palettes.custom.stops = this.customStops.map(hexToRgb);
   },
 
   resizeCanvas() {
@@ -779,6 +905,7 @@ const Sim = {
       wrap: this.wrap,
       cellSize: this.cellSize,
       colorScheme: this.colorScheme,
+      customStops: this.customStops.slice(),
       stepsPerSec: this.stepsPerSec,
       trailLength: this.trailLength,
       cols: s.cols,
@@ -796,6 +923,17 @@ const Sim = {
     this.wrap = !!obj.wrap;
     this.cellSize = obj.cellSize || this.cellSize;
     this.colorScheme = obj.colorScheme || this.colorScheme;
+    if (Array.isArray(obj.customStops) && obj.customStops.length >= 2) {
+      this.customStops = obj.customStops.slice();
+      this.syncCustomPaletteFromStops();
+    } else if (obj.customPaletteStopsStr) {
+      // legacy save format from an earlier version — still loadable
+      const stops = parseCustomStops(obj.customPaletteStopsStr);
+      if (stops) {
+        this.customStops = stops.map(rgbToHex);
+        this.syncCustomPaletteFromStops();
+      }
+    }
     this.stepsPerSec = obj.stepsPerSec || this.stepsPerSec;
     this.trailLength = obj.trailLength != null ? obj.trailLength : this.trailLength;
     if (obj.family === 'life' && obj.bs) this.bs = RuleEngine.parseBS(obj.bs);
@@ -862,6 +1000,25 @@ const Sim = {
   clear() {
     this.state.clear();
     if (this.family === 'elementary') this.elementaryLastRow = new Uint8Array(this.state.cols);
+    this.redraw();
+  },
+
+  // Seeds the grid from an already-loaded <img>, using ImageInput.sampleBinary
+  // at the current grid resolution. Re-callable cheaply, so the UI can
+  // re-sample live as the threshold/invert/fit controls change.
+  seedFromImage(img, opts) {
+    if (!img) return;
+    const cols = this.state.cols, rows = this.state.rows;
+    const binary = ImageInput.sampleBinary(img, cols, rows, opts);
+    this.state.clear();
+    if (this.family === 'elementary') {
+      const base = cols * (rows - 1);
+      const row = binary.slice(base, base + cols);
+      this.elementaryLastRow = row;
+      for (let x = 0; x < cols; x++) this.state.cells[base + x] = row[x];
+    } else {
+      this.state.cells.set(binary);
+    }
     this.redraw();
   },
 
@@ -957,10 +1114,34 @@ function syncUIFromSim() {
   $('speedVal').textContent = Sim.stepsPerSec + '/s';
 
   $('colorScheme').value = Sim.colorScheme;
+  const isCustomPalette = Sim.colorScheme === 'custom';
+  $('customPaletteRow').style.display = isCustomPalette ? 'flex' : 'none';
+  if (isCustomPalette) renderCustomSwatches();
   $('trailSlider').value = Sim.trailLength;
   $('trailVal').textContent = Sim.trailLength;
 
   document.getElementById('genCount').textContent = Sim.state.generation;
+}
+
+// Builds the row of native <input type=color> swatches for the custom
+// palette, one per entry in Sim.customStops. Each swatch doubles as the
+// color picker itself — click it, pick a color, it commits immediately.
+function renderCustomSwatches() {
+  const container = document.getElementById('customSwatches');
+  container.innerHTML = '';
+  Sim.customStops.forEach((hex, i) => {
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.className = 'swatch';
+    input.value = hex;
+    input.title = `Stop ${i + 1}`;
+    input.addEventListener('input', (e) => {
+      Sim.customStops[i] = e.target.value;
+      Sim.syncCustomPaletteFromStops();
+      if (Sim.colorScheme === 'custom') Sim.redraw();
+    });
+    container.appendChild(input);
+  });
 }
 
 function refreshPresetSelect() {
@@ -1043,10 +1224,34 @@ function wireUI() {
     $('playBtn').textContent = Sim.running ? 'Pause' : 'Play';
   }
 
-  // Color
+  // Color — palette (Gradient Map) dropdown is built from PALETTE_ORDER, so
+  // adding a palette to the Palettes object is enough to have it show up here.
+  $('colorScheme').innerHTML = PALETTE_ORDER
+    .map(key => `<option value="${key}"${key === Sim.colorScheme ? ' selected' : ''}>${Palettes[key].label}</option>`)
+    .join('');
+  Sim.syncCustomPaletteFromStops(); // seed Palettes.custom.stops even if not currently selected
+  renderCustomSwatches();
+
   $('colorScheme').addEventListener('change', (e) => {
     Sim.colorScheme = e.target.value;
+    const isCustom = Sim.colorScheme === 'custom';
+    $('customPaletteRow').style.display = isCustom ? 'flex' : 'none';
+    if (isCustom) renderCustomSwatches();
     Sim.redraw();
+  });
+  $('addStopBtn').addEventListener('click', () => {
+    if (Sim.customStops.length >= 6) return;
+    Sim.customStops.push(Sim.customStops[Sim.customStops.length - 1] || '#ffffff');
+    renderCustomSwatches();
+    Sim.syncCustomPaletteFromStops();
+    if (Sim.colorScheme === 'custom') Sim.redraw();
+  });
+  $('removeStopBtn').addEventListener('click', () => {
+    if (Sim.customStops.length <= 2) return;
+    Sim.customStops.pop();
+    renderCustomSwatches();
+    Sim.syncCustomPaletteFromStops();
+    if (Sim.colorScheme === 'custom') Sim.redraw();
   });
   $('trailSlider').addEventListener('input', (e) => {
     Sim.trailLength = Number(e.target.value);
@@ -1058,6 +1263,42 @@ function wireUI() {
   $('densitySlider').addEventListener('input', (e) => $('densityVal').textContent = e.target.value + '%');
   $('randomizeBtn').addEventListener('click', () => Sim.randomize(Number($('densitySlider').value)));
   $('clearBtn').addEventListener('click', () => Sim.clear());
+
+  // Image input — static image -> initial cell states
+  function imageOpts() {
+    return {
+      fit: $('imageFit').value,
+      threshold: Number($('imgThresholdSlider').value) / 100,
+      invert: $('imgInvert').checked,
+    };
+  }
+  $('chooseImageBtn').addEventListener('click', () => $('imageFileInput').click());
+  $('imageFileInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    $('imageStatus').textContent = 'Loading…';
+    ImageInput.loadFile(file, (img) => {
+      if (!img) { $('imageStatus').textContent = "Couldn't load that image."; return; }
+      Sim.lastImage = img;
+      Sim.seedFromImage(img, imageOpts());
+      $('imageStatus').textContent = `Loaded ${file.name} (${img.width}×${img.height}).`;
+      $('clearImageBtn').style.display = 'block';
+    });
+    e.target.value = ''; // allow re-choosing the same file later
+  });
+  $('clearImageBtn').addEventListener('click', () => {
+    Sim.lastImage = null;
+    $('clearImageBtn').style.display = 'none';
+    $('imageStatus').textContent = 'No image loaded.';
+  });
+  // Fit / threshold / invert re-sample live if an image is already loaded —
+  // no need to re-upload just to try a different threshold.
+  $('imageFit').addEventListener('change', () => { if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts()); });
+  $('imgThresholdSlider').addEventListener('input', (e) => {
+    $('imgThresholdVal').textContent = e.target.value + '%';
+    if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts());
+  });
+  $('imgInvert').addEventListener('change', () => { if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts()); });
 
   // Brush
   $('brushSlider').addEventListener('input', (e) => {
