@@ -35,6 +35,8 @@
     display:block; image-rendering:pixelated; image-rendering:crisp-edges;
     cursor:crosshair;
   }
+  #view3d{ cursor:grab; }
+  #view3d:active{ cursor:grabbing; }
   #hoverDot{
     position:absolute; pointer-events:none; border:1px solid rgba(94,230,200,.85);
     background:rgba(94,230,200,.12); border-radius:2px; display:none;
@@ -117,6 +119,7 @@
 <div id="app">
   <div id="stage">
     <canvas id="view"></canvas>
+    <canvas id="view3d" style="display:none;"></canvas>
     <div id="hoverDot"></div>
     <div id="hud">— <span id="genCount">0</span> generations · <span id="fps">0</span> fps</div>
   </div>
@@ -125,6 +128,16 @@
     <h1>Cellular Automata</h1>
     <p class="sub">Generative grid studio</p>
 
+    <!-- MODE -->
+    <div class="group">
+      <div class="row"><label class="field-label">Mode</label></div>
+      <div class="toggle-group" id="modeToggle">
+        <button data-mode="2d" class="active">2D</button>
+        <button data-mode="3d">3D</button>
+      </div>
+    </div>
+
+    <div id="panel2D">
     <!-- RULE FAMILY -->
     <div class="group">
       <div class="row"><label class="field-label">Rule family</label></div>
@@ -260,15 +273,9 @@
         <input type="checkbox" id="imgInvert">
       </div>
 
-      <div class="row" style="margin-top:10px;">
-        <label class="field-label">Pause sim when (re)seeded</label>
-        <input type="checkbox" id="imgPauseOnSeed" checked>
-      </div>
-      <p class="hint" style="margin-top:2px;">Keeps the image on screen instead of it evolving away the instant it's applied.</p>
-
       <div class="slider-row" style="margin-top:12px;">
-        <div class="top"><label class="field-label">Continuous feed</label><span class="val" id="imageFeedVal">Off</span></div>
-        <input type="range" id="imageFeedSlider" min="0" max="60" value="0">
+        <div class="top"><label class="field-label">Continuous feed</label><span class="val" id="imageFeedVal">every 30</span></div>
+        <input type="range" id="imageFeedSlider" min="0" max="60" value="30">
       </div>
       <p class="hint">Re-injects the image's live cells every N generations while running, instead of a single one-time seed — a steady "light source" the automaton keeps reacting to. 0 = off.</p>
     </div>
@@ -276,8 +283,8 @@
     <!-- DRAWING -->
     <div class="group">
       <div class="slider-row">
-        <div class="top"><label class="field-label">Brush size</label><span class="val" id="brushVal">1</span></div>
-        <input type="range" id="brushSlider" min="1" max="10" value="1">
+        <div class="top"><label class="field-label">Brush size</label><span class="val" id="brushVal">5</span></div>
+        <input type="range" id="brushSlider" min="1" max="10" value="5">
       </div>
       <p class="hint">Click / drag on canvas to draw or erase, live or paused.</p>
     </div>
@@ -321,8 +328,108 @@
         <span class="kbd">R</span> randomize
       </p>
     </div>
+    </div><!-- /panel2D -->
+
+    <div id="panel3D" style="display:none;">
+      <!-- RULE -->
+      <div class="group">
+        <div class="row"><label class="field-label">Rule (3D life-like, B/S over 0–26 neighbors)</label></div>
+        <select id="rule3DPreset">
+          <option value="B4/S4">Stable blobs — B4/S4</option>
+          <option value="B5/S5">Sparse growth — B5/S5</option>
+          <option value="B6/S6,7,8">Amoeba — B6/S6,7,8</option>
+          <option value="B13,14,17,18,19/S13,14,15,16,17">Crystal — B13,14,17,18,19/S13,14,15,16,17</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <div class="row" style="margin-top:8px;">
+          <input type="text" id="custom3DRule" placeholder="e.g. B4/S4 or B13,14/S13,14,15" value="B4/S4">
+        </div>
+        <p class="hint">Comma-separated neighbor counts (0–26) since counts can run past a single digit.</p>
+      </div>
+
+      <!-- GRID -->
+      <div class="group">
+        <div class="slider-row">
+          <div class="top"><label class="field-label">Grid size (N³)</label><span class="val" id="size3DVal">32</span></div>
+          <input type="range" id="size3DSlider" min="16" max="48" value="32">
+        </div>
+        <div class="row">
+          <label class="field-label">Edges</label>
+          <div class="toggle-group" id="edge3DToggle">
+            <button data-edge="wrap" class="active">Wrap</button>
+            <button data-edge="dead">Dead</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- SIMULATION -->
+      <div class="group">
+        <div class="slider-row">
+          <div class="top"><label class="field-label">Speed</label><span class="val" id="speed3DVal">6/s</span></div>
+          <input type="range" id="speed3DSlider" min="1" max="30" value="6">
+        </div>
+        <div class="btn-row">
+          <button id="play3DBtn" class="primary">Pause</button>
+          <button id="step3DBtn">Step</button>
+          <button id="reset3DBtn">Reset</button>
+        </div>
+      </div>
+
+      <!-- COLOR -->
+      <div class="group">
+        <div class="row"><label class="field-label">Palette (Gradient Map)</label></div>
+        <select id="colorScheme3D"></select>
+        <p class="hint">Same palette system as 2D. Pick "Custom…" and edit its stops from 2D mode's color section — the custom slot is shared between both.</p>
+      </div>
+
+      <!-- SEEDING -->
+      <div class="group">
+        <div class="slider-row">
+          <div class="top"><label class="field-label">Randomize density</label><span class="val" id="density3DVal">12%</span></div>
+          <input type="range" id="density3DSlider" min="1" max="60" value="12">
+        </div>
+        <div class="btn-row">
+          <button id="randomize3DBtn">Randomize</button>
+          <button id="clear3DBtn" class="danger">Clear</button>
+        </div>
+      </div>
+
+      <!-- CAMERA / INTERACTION -->
+      <div class="group">
+        <div class="row"><label class="field-label">Camera</label></div>
+        <p class="hint" style="margin-top:0;">Drag to orbit · scroll to zoom · click a voxel to erase it.</p>
+        <div class="btn-row" style="margin-top:8px;">
+          <button id="resetCamera3DBtn">Reset camera</button>
+        </div>
+      </div>
+
+      <!-- SAVE / LOAD / SHARE -->
+      <div class="group">
+        <div class="row"><label class="field-label">Save / load state</label></div>
+        <p class="hint" style="margin-top:0;">Serializes the 3D grid, rule, and view as JSON.</p>
+        <div class="btn-row" style="margin-top:8px;">
+          <button id="save3DStateBtn">Save .json</button>
+          <button id="load3DStateBtn">Load .json</button>
+        </div>
+        <input type="file" id="load3DStateInput" accept="application/json,.json" style="display:none;">
+        <div class="btn-row" style="margin-top:8px;">
+          <button id="share3DLinkBtn">Copy share link</button>
+        </div>
+        <p class="hint" id="share3DStatus"></p>
+      </div>
+
+      <div class="group" style="border-bottom:none;">
+        <p class="hint">
+          <span class="kbd">space</span> play/pause &nbsp;
+          <span class="kbd">C</span> clear &nbsp;
+          <span class="kbd">R</span> randomize
+        </p>
+      </div>
+    </div><!-- /panel3D -->
   </div>
 </div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
 <script>
 /* =========================================================================
@@ -539,6 +646,107 @@ const LIFE_PRESETS = {
   "B368/S245": "Morley",
 };
 
+// =============================================================================
+// 3D MODE — a genuinely separate cellular automaton, not a visualization of
+// the 2D one. Deliberately kept as its own parallel subsystem (own grid
+// state, own rule engine, own renderer, own orchestrator) rather than
+// threaded through the 2D code, so the existing 2D tool is untouched and
+// this can be extended independently later.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Grid3DState — cubic grid, flat typed array, x + y*sx + z*sx*sy indexing.
+// Same shape as the 2D GridState (cells + ages), just one more dimension.
+// ---------------------------------------------------------------------------
+class Grid3DState {
+  constructor(size) {
+    this.size = size; // cube: size x size x size
+    const n = size * size * size;
+    this.cells = new Uint8Array(n);
+    this.ages = new Uint16Array(n);
+    this.generation = 0;
+  }
+  idx(x, y, z) { const s = this.size; return x + y * s + z * s * s; }
+  get(x, y, z) {
+    const s = this.size;
+    if (x < 0 || x >= s || y < 0 || y >= s || z < 0 || z >= s) return 0;
+    return this.cells[this.idx(x, y, z)];
+  }
+  clear() {
+    this.cells.fill(0);
+    this.ages.fill(0);
+    this.generation = 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// RuleEngine3D — 3D life-like rules over the 26-neighbor Moore neighborhood
+// (a 3x3x3 cube minus its center). Birth/Survive counts can run from 0 to
+// 26, so — unlike the 2D "B3/S23" shorthand where each digit is one count —
+// 3D rules use comma-separated numbers: "B4/S4", "B13,14/S13,14,15".
+// ---------------------------------------------------------------------------
+const RuleEngine3D = {
+  // Precomputed once: the 26 neighbor offsets (all of -1..1 in x,y,z except 0,0,0).
+  NEIGHBOR_OFFSETS: (() => {
+    const offs = [];
+    for (let dz = -1; dz <= 1; dz++)
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++)
+          if (dx || dy || dz) offs.push([dx, dy, dz]);
+    return offs;
+  })(),
+
+  parseBS(str) {
+    const m = /^B([0-9,]*)\/S([0-9,]*)$/i.exec((str || '').trim());
+    if (!m) return null;
+    const toSet = (part) => new Set(part.split(',').map(s => s.trim()).filter(Boolean).map(Number));
+    return { birth: toSet(m[1]), survive: toSet(m[2]) };
+  },
+  bsToString(bs) {
+    const b = [...bs.birth].sort((a, c) => a - c).join(',');
+    const s = [...bs.survive].sort((a, c) => a - c).join(',');
+    return `B${b}/S${s}`;
+  },
+
+  step(state, opts) {
+    const { size, cells } = state;
+    const { wrap, bs } = opts;
+    const n = size * size * size;
+    const next = new Uint8Array(n);
+    const offs = this.NEIGHBOR_OFFSETS;
+    for (let z = 0; z < size; z++) {
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          let count = 0;
+          for (let k = 0; k < 26; k++) {
+            let nx = x + offs[k][0], ny = y + offs[k][1], nz = z + offs[k][2];
+            if (wrap) {
+              nx = (nx + size) % size; ny = (ny + size) % size; nz = (nz + size) % size;
+            } else if (nx < 0 || nx >= size || ny < 0 || ny >= size || nz < 0 || nz >= size) {
+              continue;
+            }
+            if (cells[nx + ny * size + nz * size * size]) count++;
+          }
+          const i = x + y * size + z * size * size;
+          const alive = cells[i] !== 0;
+          next[i] = alive ? (bs.survive.has(count) ? 1 : 0) : (bs.birth.has(count) ? 1 : 0);
+        }
+      }
+    }
+    return next;
+  }
+};
+
+// Named presets for the 3D rule engine (serializable "B../S.." strings).
+// Named descriptively rather than by historical attribution, since exact
+// provenance of specific 3D-Life parameter sets varies across sources.
+const LIFE_3D_PRESETS = {
+  "B4/S4": "Stable blobs",
+  "B5/S5": "Sparse growth",
+  "B6/S6,7,8": "Amoeba",
+  "B13,14,17,18,19/S13,14,15,16,17": "Crystal",
+};
+
 // ---------------------------------------------------------------------------
 // Palettes — Gradient Maps. Each cell's "shade of gray" (its age, normalized
 // to 0..1) is looked up through a palette's color stops, exactly like a
@@ -673,7 +881,7 @@ const Renderer = {
 const MouseInput = {
   drawing: false,
   eraseMode: false,
-  brush: 1,
+  brush: 5,
   attach(canvas, getState, getCellSize, onPaint) {
     const toGrid = (evt) => {
       const rect = canvas.getBoundingClientRect();
@@ -761,6 +969,170 @@ const ImageInput = {
   }
 };
 
+// =============================================================================
+// Renderer3D — Three.js-backed voxel renderer + hand-rolled orbit camera.
+// One InstancedMesh sized to the current cube's cell count; only the alive
+// cells occupy the first `aliveCount` instances each frame (mesh.count caps
+// what actually renders), colored via the same Palettes/sampleGradient
+// system the 2D renderer uses. Orbit controls are done manually (spherical
+// camera around the origin) rather than via THREE.OrbitControls, so the
+// whole tool still only depends on the single three.min.js script tag.
+// ---------------------------------------------------------------------------
+const Renderer3D = {
+  scene: null, camera: null, renderer: null, mesh: null, edges: null,
+  canvas: null,
+  size: 0,
+  instanceGridIndex: null, // instance slot -> flat grid index, for click-to-erase picking
+  cam: { theta: Math.PI / 4, phi: Math.PI / 3, radius: 0, target: null },
+  dragging: false, lastX: 0, lastY: 0, dragMoved: 0,
+
+  init(canvas) {
+    this.canvas = canvas;
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 2000);
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(1, 1.4, 1);
+    this.scene.add(dir);
+    const dir2 = new THREE.DirectionalLight(0x88aaff, 0.35);
+    dir2.position.set(-1, -0.6, -1);
+    this.scene.add(dir2);
+
+    this.cam.target = new THREE.Vector3(0, 0, 0);
+    this.attachCameraControls(canvas);
+  },
+
+  // Rebuilds the instanced mesh + bounding box for a new cube size.
+  setSize(size) {
+    this.size = size;
+    if (this.mesh) { this.scene.remove(this.mesh); this.mesh.geometry.dispose(); this.mesh.material.dispose(); }
+    if (this.edges) { this.scene.remove(this.edges); this.edges.geometry.dispose(); this.edges.material.dispose(); }
+
+    const maxN = size * size * size;
+    const geo = new THREE.BoxGeometry(0.85, 0.85, 0.85);
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.05 });
+    this.mesh = new THREE.InstancedMesh(geo, mat, maxN);
+    this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(maxN * 3), 3);
+    this.mesh.count = 0;
+    this.scene.add(this.mesh);
+    this.instanceGridIndex = new Int32Array(maxN);
+
+    const boxGeo = new THREE.BoxGeometry(size, size, size);
+    this.edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(boxGeo),
+      new THREE.LineBasicMaterial({ color: 0x2a2f3a, transparent: true, opacity: 0.6 })
+    );
+    this.scene.add(this.edges);
+    boxGeo.dispose();
+
+    this.cam.radius = size * 1.9;
+    this.resetCamera();
+  },
+
+  resetCamera() {
+    this.cam.theta = Math.PI / 4;
+    this.cam.phi = Math.PI / 3;
+    this.cam.radius = this.size * 1.9;
+  },
+
+  // Pushes alive cells (with age-based palette color) into the instanced
+  // mesh. Called only when the sim actually steps/changes — not every frame.
+  draw(state, paletteKey, ageDivisor) {
+    const size = state.size;
+    const { cells, ages } = state;
+    const palette = Palettes[paletteKey] || Palettes.mono;
+    const half = (size - 1) / 2;
+    const dummy = new THREE.Object3D();
+    let count = 0;
+    const n = size * size * size;
+    for (let i = 0; i < n; i++) {
+      if (!cells[i]) continue;
+      const z = Math.floor(i / (size * size));
+      const y = Math.floor((i - z * size * size) / size);
+      const x = i - z * size * size - y * size;
+      dummy.position.set(x - half, y - half, z - half);
+      dummy.updateMatrix();
+      this.mesh.setMatrixAt(count, dummy.matrix);
+      const t = Math.min(ages[i] / ageDivisor, 1);
+      const [r, g, b] = sampleGradient(palette.stops, t);
+      this.mesh.setColorAt(count, new THREE.Color(r / 255, g / 255, b / 255));
+      this.instanceGridIndex[count] = i;
+      count++;
+    }
+    this.mesh.count = count;
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  },
+
+  handleResize() {
+    const stage = document.getElementById('stage');
+    const w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+  },
+
+  present() {
+    const c = this.cam;
+    this.camera.position.set(
+      c.target.x + c.radius * Math.sin(c.phi) * Math.sin(c.theta),
+      c.target.y + c.radius * Math.cos(c.phi),
+      c.target.z + c.radius * Math.sin(c.phi) * Math.cos(c.theta)
+    );
+    this.camera.lookAt(c.target);
+    this.renderer.render(this.scene, this.camera);
+  },
+
+  // Manual orbit (drag to rotate, wheel to zoom) plus click-to-erase picking
+  // via raycasting against the instanced mesh's recorded grid indices.
+  attachCameraControls(canvas) {
+    const onDown = (e) => {
+      this.dragging = true; this.dragMoved = 0;
+      this.lastX = e.clientX; this.lastY = e.clientY;
+    };
+    const onMove = (e) => {
+      if (!this.dragging) return;
+      const dx = e.clientX - this.lastX, dy = e.clientY - this.lastY;
+      this.dragMoved += Math.abs(dx) + Math.abs(dy);
+      this.cam.theta -= dx * 0.008;
+      this.cam.phi = Math.max(0.08, Math.min(Math.PI - 0.08, this.cam.phi - dy * 0.008));
+      this.lastX = e.clientX; this.lastY = e.clientY;
+    };
+    const onUp = (e) => {
+      if (this.dragging && this.dragMoved < 4) this.tryErase(e); // treat as a click, not a drag
+      this.dragging = false;
+    };
+    canvas.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const min = this.size * 0.6, max = this.size * 5;
+      this.cam.radius = Math.max(min, Math.min(max, this.cam.radius * (1 + e.deltaY * 0.001)));
+    }, { passive: false });
+  },
+
+  tryErase(evt) {
+    if (!this.onErase || this.mesh.count === 0) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((evt.clientX - rect.left) / rect.width) * 2 - 1,
+      -((evt.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(mouse, this.camera);
+    const hit = ray.intersectObject(this.mesh);
+    if (hit.length && hit[0].instanceId != null) {
+      const gridIndex = this.instanceGridIndex[hit[0].instanceId];
+      this.onErase(gridIndex);
+    }
+  }
+};
+
 const HoverDot = {
   el: document.getElementById('hoverDot'),
   update(canvas, evt, cellSize, brush) {
@@ -844,8 +1216,7 @@ const Sim = {
   customStops: ['#0a0a1e', '#2a5b9c', '#ff2fb0', '#fef6c9'],
   lastImage: null, // currently loaded <img>, if any — used to re-sample live as controls change
   imageOpts: { fit: 'cover', threshold: 0.5, invert: false },
-  pauseOnImageSeed: true,
-  imageFeedInterval: 0, // 0 = one-shot seed only; >0 = re-inject the image every N generations
+  imageFeedInterval: 30, // re-inject the image's live cells every N generations while running; 0 = off
   imageFeedCounter: 0,
   running: true,
   suppressAutoFit: false,
@@ -919,6 +1290,7 @@ const Sim = {
   serialize() {
     const s = this.state;
     const obj = {
+      mode: '2d',
       version: 1,
       family: this.family,
       wrap: this.wrap,
@@ -1042,7 +1414,6 @@ const Sim = {
       this.state.cells.set(binary);
     }
     this.redraw();
-    if (this.pauseOnImageSeed) this.running = false; // let it sit before it evolves away
   },
 
   // Non-destructive variant used by the continuous-feed loop: ORs the
@@ -1110,24 +1481,155 @@ const Sim = {
     const dt = t - this.lastTime;
     this.lastTime = t;
 
-    this.fpsAccum += dt; this.fpsFrames++;
-    if (this.fpsAccum > 500) {
-      document.getElementById('fps').textContent = Math.round(this.fpsFrames * 1000 / this.fpsAccum);
-      this.fpsAccum = 0; this.fpsFrames = 0;
-    }
-
-    if (this.running) {
-      this.accumulator += dt;
-      const interval = 1000 / this.stepsPerSec;
-      let steps = 0;
-      while (this.accumulator >= interval && steps < 8) { // cap to avoid spiral of death
-        this.step();
-        this.accumulator -= interval;
-        steps++;
+    if (AppMode.current === '2d') {
+      this.fpsAccum += dt; this.fpsFrames++;
+      if (this.fpsAccum > 500) {
+        document.getElementById('fps').textContent = Math.round(this.fpsFrames * 1000 / this.fpsAccum);
+        this.fpsAccum = 0; this.fpsFrames = 0;
       }
-      if (steps > 0) this.redraw();
+
+      if (this.running) {
+        this.accumulator += dt;
+        const interval = 1000 / this.stepsPerSec;
+        let steps = 0;
+        while (this.accumulator >= interval && steps < 8) { // cap to avoid spiral of death
+          this.step();
+          this.accumulator -= interval;
+          steps++;
+        }
+        if (steps > 0) this.redraw();
+      }
+      Renderer.present(this.ctx, this.canvas);
     }
-    Renderer.present(this.ctx, this.canvas);
+    requestAnimationFrame((tt) => this.loop(tt));
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Sim3D — orchestrates the 3D CA: timing, rule dispatch, rendering, camera.
+// Deliberately parallel in shape to `Sim` (the 2D orchestrator) rather than
+// sharing code with it, so the two modes stay fully independent.
+// ---------------------------------------------------------------------------
+const Sim3D = {
+  initialized: false,
+  state: null,
+  size: 32,
+  wrap: true,
+  bs: RuleEngine3D.parseBS('B4/S4'),
+  colorScheme: 'thermal',
+  ageDivisor: 12, // 3D neighborhoods are denser, so cells age into their gradient faster than in 2D
+  running: true,
+  stepsPerSec: 6,
+  accumulator: 0,
+  lastTime: 0,
+
+  // Lazily constructed on first switch to 3D mode — avoids paying for a
+  // WebGL context / Three.js scene for anyone who never opens 3D mode.
+  init() {
+    this.initialized = true;
+    Renderer3D.init(document.getElementById('view3d'));
+    Renderer3D.onErase = (gridIndex) => {
+      this.state.cells[gridIndex] = 0;
+      this.state.ages[gridIndex] = 0;
+      this.redraw();
+    };
+    this.setSize(this.size);
+    this.randomize(12);
+    wireUI3D();
+    requestAnimationFrame((t) => this.loop(t));
+  },
+
+  setSize(size) {
+    this.size = size;
+    this.state = new Grid3DState(size);
+    Renderer3D.setSize(size);
+  },
+
+  redraw() {
+    Renderer3D.draw(this.state, this.colorScheme, this.ageDivisor);
+  },
+
+  ruleConfig() {
+    return { wrap: this.wrap, bs: RuleEngine3D.bsToString(this.bs) };
+  },
+  applyRuleConfig(cfg) {
+    this.wrap = !!cfg.wrap;
+    if (cfg.bs) this.bs = RuleEngine3D.parseBS(cfg.bs);
+    this.state.clear();
+    this.redraw();
+  },
+
+  randomize(densityPct) {
+    this.state.clear();
+    for (let i = 0; i < this.state.cells.length; i++) {
+      this.state.cells[i] = Math.random() * 100 < densityPct ? 1 : 0;
+    }
+    this.redraw();
+  },
+  clear() {
+    this.state.clear();
+    this.redraw();
+  },
+
+  step() {
+    const next = RuleEngine3D.step(this.state, { wrap: this.wrap, bs: this.bs });
+    const s = this.state;
+    for (let i = 0; i < next.length; i++) {
+      if (next[i]) s.ages[i] = s.cells[i] ? Math.min(s.ages[i] + 1, 4000) : 0;
+      else s.ages[i] = 0;
+    }
+    s.cells = next;
+    s.generation++;
+  },
+
+  serialize() {
+    const s = this.state;
+    return {
+      mode: '3d',
+      version: 1,
+      size: s.size,
+      wrap: this.wrap,
+      bs: RuleEngine3D.bsToString(this.bs),
+      colorScheme: this.colorScheme,
+      stepsPerSec: this.stepsPerSec,
+      generation: s.generation,
+      cells: u8ToBase64(s.cells),
+    };
+  },
+  applyState(obj) {
+    this.wrap = !!obj.wrap;
+    if (obj.bs) this.bs = RuleEngine3D.parseBS(obj.bs);
+    this.colorScheme = obj.colorScheme || this.colorScheme;
+    this.stepsPerSec = obj.stepsPerSec || this.stepsPerSec;
+    this.setSize(obj.size);
+    this.state.cells.set(base64ToU8(obj.cells));
+    this.state.generation = obj.generation || 0;
+    this.redraw();
+    syncUIFromSim3D();
+  },
+
+  loop(t) {
+    if (!this.lastTime) this.lastTime = t;
+    const dt = t - this.lastTime;
+    this.lastTime = t;
+
+    if (AppMode.current === '3d') {
+      if (this.running) {
+        this.accumulator += dt;
+        const interval = 1000 / this.stepsPerSec;
+        let steps = 0;
+        while (this.accumulator >= interval && steps < 4) { // 3D steps are pricier; cap tighter than 2D
+          this.step();
+          this.accumulator -= interval;
+          steps++;
+        }
+        if (steps > 0) {
+          this.redraw();
+          document.getElementById('genCount').textContent = this.state.generation;
+        }
+      }
+      Renderer3D.present();
+    }
     requestAnimationFrame((tt) => this.loop(tt));
   }
 };
@@ -1170,6 +1672,60 @@ function syncUIFromSim() {
   $('trailVal').textContent = Sim.trailLength;
 
   document.getElementById('genCount').textContent = Sim.state.generation;
+}
+
+// ---------------------------------------------------------------------------
+// AppMode — tracks which canvas/panel is active (2D vs 3D) and switches
+// between them. Both Sim and Sim3D keep running their own rAF loop chains
+// regardless of which mode is visible; each checks AppMode.current itself
+// and skips its heavy work when inactive, so switching back is instant with
+// no re-initialization (after 3D's one-time lazy init on first visit).
+// ---------------------------------------------------------------------------
+const AppMode = { current: '2d' };
+
+function setMode(mode) {
+  AppMode.current = mode;
+  document.getElementById('panel2D').style.display = mode === '2d' ? 'block' : 'none';
+  document.getElementById('panel3D').style.display = mode === '3d' ? 'block' : 'none';
+  document.getElementById('view').style.display = mode === '2d' ? 'block' : 'none';
+  document.getElementById('view3d').style.display = mode === '3d' ? 'block' : 'none';
+  document.getElementById('hoverDot').style.display = 'none';
+  document.querySelectorAll('#modeToggle button').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+
+  if (mode === '3d') {
+    if (!Sim3D.initialized) Sim3D.init(); // first visit: build the Three.js scene
+    // The canvas was display:none until just now, so it had zero size —
+    // resize once it's actually visible, then keep it in sync going forward.
+    requestAnimationFrame(() => Renderer3D.handleResize());
+    document.getElementById('genCount').textContent = Sim3D.state.generation;
+  } else {
+    document.getElementById('genCount').textContent = Sim.state.generation;
+  }
+}
+
+// Mirrors syncUIFromSim() above, for the 3D panel — called after a preset
+// load, a full-state load, or a share-link restore.
+function syncUIFromSim3D() {
+  const $ = (id) => document.getElementById(id);
+  const bsStr = RuleEngine3D.bsToString(Sim3D.bs);
+  $('custom3DRule').value = bsStr;
+  $('rule3DPreset').value = LIFE_3D_PRESETS[bsStr] ? bsStr : 'custom';
+
+  $('size3DSlider').value = Sim3D.size;
+  $('size3DVal').textContent = Sim3D.size;
+
+  document.querySelectorAll('#edge3DToggle button').forEach(b => {
+    b.classList.toggle('active', (b.dataset.edge === 'wrap') === Sim3D.wrap);
+  });
+
+  $('speed3DSlider').value = Sim3D.stepsPerSec;
+  $('speed3DVal').textContent = Sim3D.stepsPerSec + '/s';
+
+  $('colorScheme3D').value = Sim3D.colorScheme;
+
+  document.getElementById('genCount').textContent = Sim3D.state.generation;
 }
 
 // Builds the row of native <input type=color> swatches for the custom
@@ -1326,10 +1882,6 @@ function wireUI() {
     Sim.imageOpts = opts; // keep Sim's copy current so the continuous-feed loop in step() sees live values
     return opts;
   }
-  function seedFromImageAndSync() {
-    Sim.seedFromImage(Sim.lastImage, imageOpts());
-    syncPlayButton(); // seedFromImage may auto-pause
-  }
   $('chooseImageBtn').addEventListener('click', () => $('imageFileInput').click());
   $('imageFileInput').addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -1338,14 +1890,14 @@ function wireUI() {
     ImageInput.loadFile(file, (img) => {
       if (!img) { $('imageStatus').textContent = "Couldn't load that image."; return; }
       Sim.lastImage = img;
-      seedFromImageAndSync();
+      Sim.seedFromImage(img, imageOpts());
       $('imageStatus').textContent = `Loaded ${file.name} (${img.width}×${img.height}).`;
       $('resampleImageBtn').disabled = false;
       $('removeImageRow').style.display = 'flex';
     });
     e.target.value = ''; // allow re-choosing the same file later
   });
-  $('resampleImageBtn').addEventListener('click', () => { if (Sim.lastImage) seedFromImageAndSync(); });
+  $('resampleImageBtn').addEventListener('click', () => { if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts()); });
   $('clearImageBtn').addEventListener('click', () => {
     Sim.lastImage = null;
     $('resampleImageBtn').disabled = true;
@@ -1354,13 +1906,12 @@ function wireUI() {
   });
   // Fit / threshold / invert re-sample live if an image is already loaded —
   // no need to re-upload just to try a different threshold.
-  $('imageFit').addEventListener('change', () => { if (Sim.lastImage) seedFromImageAndSync(); });
+  $('imageFit').addEventListener('change', () => { if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts()); });
   $('imgThresholdSlider').addEventListener('input', (e) => {
     $('imgThresholdVal').textContent = e.target.value + '%';
-    if (Sim.lastImage) seedFromImageAndSync();
+    if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts());
   });
-  $('imgInvert').addEventListener('change', () => { if (Sim.lastImage) seedFromImageAndSync(); });
-  $('imgPauseOnSeed').addEventListener('change', (e) => { Sim.pauseOnImageSeed = e.target.checked; });
+  $('imgInvert').addEventListener('change', () => { if (Sim.lastImage) Sim.seedFromImage(Sim.lastImage, imageOpts()); });
   $('imageFeedSlider').addEventListener('input', (e) => {
     Sim.imageFeedInterval = Number(e.target.value);
     Sim.imageFeedCounter = 0;
@@ -1377,10 +1928,27 @@ function wireUI() {
   window.addEventListener('keydown', (e) => {
     const tag = document.activeElement.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
-    else if (e.key.toLowerCase() === 'c') Sim.clear();
-    else if (e.key.toLowerCase() === 'r') Sim.randomize(Number($('densitySlider').value));
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (AppMode.current === '3d') {
+        Sim3D.running = !Sim3D.running;
+        $('play3DBtn').textContent = Sim3D.running ? 'Pause' : 'Play';
+      } else {
+        togglePlay();
+      }
+    } else if (e.key.toLowerCase() === 'c') {
+      if (AppMode.current === '3d') Sim3D.clear(); else Sim.clear();
+    } else if (e.key.toLowerCase() === 'r') {
+      if (AppMode.current === '3d') Sim3D.randomize(Number($('density3DSlider').value));
+      else Sim.randomize(Number($('densitySlider').value));
+    }
   });
+
+  // Mode toggle (2D / 3D)
+  document.querySelectorAll('#modeToggle button').forEach(btn => {
+    btn.addEventListener('click', () => setMode(btn.dataset.mode));
+  });
+  window.addEventListener('resize', () => { if (Sim3D.initialized) Renderer3D.handleResize(); });
 
   // --- Rule presets (family + params only; saved to localStorage) ---------
   refreshPresetSelect();
@@ -1425,6 +1993,7 @@ function wireUI() {
     reader.onload = () => {
       try {
         const obj = JSON.parse(reader.result);
+        if (obj.mode === '3d') { $('shareStatus').textContent = 'That file is a 3D save — switch to 3D mode and load it there.'; return; }
         Sim.applyState(obj);
         $('shareStatus').textContent = 'Loaded ' + file.name;
       } catch (err) {
@@ -1454,12 +2023,130 @@ function wireUI() {
     try {
       const encoded = location.hash.slice('#state='.length);
       const obj = JSON.parse(decodeURIComponent(escape(atob(encoded))));
-      Sim.applyState(obj);
-      $('shareStatus').textContent = 'Restored from shared link.';
+      if (obj.mode === '3d') {
+        setMode('3d'); // lazily initializes Sim3D if needed
+        Sim3D.applyState(obj);
+        $('share3DStatus').textContent = 'Restored from shared link.';
+      } else {
+        Sim.applyState(obj);
+        $('shareStatus').textContent = 'Restored from shared link.';
+      }
     } catch (err) {
       // malformed or truncated hash — ignore and fall back to the default boot state
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// wireUI3D — binds all panel3D controls. Called once, lazily, the first time
+// the user switches to 3D mode (from Sim3D.init()), mirroring wireUI() above.
+// ---------------------------------------------------------------------------
+function wireUI3D() {
+  const $ = (id) => document.getElementById(id);
+
+  // Rule preset / custom
+  $('rule3DPreset').addEventListener('change', (e) => {
+    if (e.target.value === 'custom') { $('custom3DRule').focus(); return; }
+    $('custom3DRule').value = e.target.value;
+    applyRule3D(e.target.value);
+  });
+  $('custom3DRule').addEventListener('change', (e) => applyRule3D(e.target.value));
+  function applyRule3D(str) {
+    const parsed = RuleEngine3D.parseBS(str);
+    if (parsed) Sim3D.bs = parsed;
+  }
+
+  // Grid size
+  $('size3DSlider').addEventListener('change', (e) => {
+    Sim3D.setSize(Number(e.target.value));
+    Sim3D.randomize(Number($('density3DSlider').value));
+  });
+  $('size3DSlider').addEventListener('input', (e) => { $('size3DVal').textContent = e.target.value; });
+
+  // Edge toggle
+  document.querySelectorAll('#edge3DToggle button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#edge3DToggle button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      Sim3D.wrap = btn.dataset.edge === 'wrap';
+    });
+  });
+
+  // Speed / play / step / reset
+  $('speed3DSlider').addEventListener('input', (e) => {
+    Sim3D.stepsPerSec = Number(e.target.value);
+    $('speed3DVal').textContent = e.target.value + '/s';
+  });
+  $('play3DBtn').addEventListener('click', () => {
+    Sim3D.running = !Sim3D.running;
+    $('play3DBtn').textContent = Sim3D.running ? 'Pause' : 'Play';
+  });
+  $('step3DBtn').addEventListener('click', () => { Sim3D.step(); Sim3D.redraw(); document.getElementById('genCount').textContent = Sim3D.state.generation; });
+  $('reset3DBtn').addEventListener('click', () => Sim3D.clear());
+
+  // Palette — reuses the exact same Palettes registry/PALETTE_ORDER as 2D,
+  // including the shared "Custom" slot (edited from 2D mode's color panel).
+  $('colorScheme3D').innerHTML = PALETTE_ORDER
+    .map(key => `<option value="${key}"${key === Sim3D.colorScheme ? ' selected' : ''}>${Palettes[key].label}</option>`)
+    .join('');
+  $('colorScheme3D').addEventListener('change', (e) => {
+    Sim3D.colorScheme = e.target.value;
+    Sim3D.redraw();
+  });
+
+  // Randomize / clear
+  $('density3DSlider').addEventListener('input', (e) => $('density3DVal').textContent = e.target.value + '%');
+  $('randomize3DBtn').addEventListener('click', () => Sim3D.randomize(Number($('density3DSlider').value)));
+  $('clear3DBtn').addEventListener('click', () => Sim3D.clear());
+
+  // Camera
+  $('resetCamera3DBtn').addEventListener('click', () => Renderer3D.resetCamera());
+
+  // Save / load / share (parallels the 2D versions, tagged mode:'3d')
+  $('save3DStateBtn').addEventListener('click', () => {
+    const obj = Sim3D.serialize();
+    const blob = new Blob([JSON.stringify(obj)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ca3d-state-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+  $('load3DStateBtn').addEventListener('click', () => $('load3DStateInput').click());
+  $('load3DStateInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const obj = JSON.parse(reader.result);
+        if (obj.mode !== '3d') { $('share3DStatus').textContent = 'That file is a 2D save — switch to 2D mode and load it there.'; return; }
+        Sim3D.applyState(obj);
+        $('share3DStatus').textContent = 'Loaded ' + file.name;
+      } catch (err) {
+        $('share3DStatus').textContent = 'Could not read that file — is it a valid saved state?';
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  });
+  $('share3DLinkBtn').addEventListener('click', async () => {
+    const obj = Sim3D.serialize();
+    const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
+    const url = location.origin + location.pathname + '#state=' + encoded;
+    try {
+      await navigator.clipboard.writeText(url);
+      $('share3DStatus').textContent = 'Link copied to clipboard.';
+    } catch (err) {
+      $('share3DStatus').textContent = 'Clipboard blocked — link is in the address bar instead.';
+      history.replaceState(null, '', '#state=' + encoded);
+    }
+  });
+
+  syncUIFromSim3D();
 }
 
 // ---------------------------------------------------------------------------
