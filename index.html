@@ -28,9 +28,10 @@
   }
   #stage{
     position:relative; flex:1 1 auto; min-width:0; height:100%;
-    background:#000;
+    background:#000; overflow:hidden;
     display:flex; align-items:center; justify-content:center;
   }
+  #view3d{ max-width:100%; max-height:100%; }
   #stage canvas{
     display:block; image-rendering:pixelated; image-rendering:crisp-edges;
     cursor:crosshair;
@@ -396,8 +397,12 @@
 
       <!-- CAMERA / INTERACTION -->
       <div class="group">
-        <div class="row"><label class="field-label">Camera</label></div>
-        <p class="hint" style="margin-top:0;">Drag to orbit · scroll to zoom · click a voxel to erase it.</p>
+        <div class="row"><label class="field-label">Camera &amp; drawing</label></div>
+        <p class="hint" style="margin-top:0;">Left-click/drag to draw or erase · right-click/drag to orbit · scroll to zoom.</p>
+        <div class="slider-row" style="margin-top:10px;">
+          <div class="top"><label class="field-label">Brush size</label><span class="val" id="brush3DVal">1</span></div>
+          <input type="range" id="brush3DSlider" min="1" max="3" value="1">
+        </div>
         <div class="btn-row" style="margin-top:8px;">
           <button id="resetCamera3DBtn">Reset camera</button>
         </div>
@@ -671,6 +676,13 @@ class Grid3DState {
     const s = this.size;
     if (x < 0 || x >= s || y < 0 || y >= s || z < 0 || z >= s) return 0;
     return this.cells[this.idx(x, y, z)];
+  }
+  set(x, y, z, v) {
+    const s = this.size;
+    if (x < 0 || x >= s || y < 0 || y >= s || z < 0 || z >= s) return;
+    const i = this.idx(x, y, z);
+    if (this.cells[i] !== v) this.ages[i] = 0;
+    this.cells[i] = v;
   }
   clear() {
     this.cells.fill(0);
@@ -971,20 +983,29 @@ const ImageInput = {
 
 // =============================================================================
 // Renderer3D — Three.js-backed voxel renderer + hand-rolled orbit camera.
-// One InstancedMesh sized to the current cube's cell count; only the alive
-// cells occupy the first `aliveCount` instances each frame (mesh.count caps
-// what actually renders), colored via the same Palettes/sampleGradient
-// system the 2D renderer uses. Orbit controls are done manually (spherical
-// camera around the origin) rather than via THREE.OrbitControls, so the
-// whole tool still only depends on the single three.min.js script tag.
+//
+// Coloring deliberately avoids InstancedMesh's per-instance color API
+// (setColorAt/instanceColor): it has known edge cases across three.js
+// versions/timing that made every cell render black. Instead, cells are
+// bucketed by their age into a fixed number of brightness bands, and each
+// band gets its OWN InstancedMesh with one flat `material.color`. That
+// means the only InstancedMesh feature this relies on is setMatrixAt,
+// which is the most basic, rock-solid part of the API — at the cost of
+// discrete color bands instead of a perfectly continuous gradient.
+//
+// Interaction: left-click/drag paints or erases with a brush (mirrors the
+// 2D canvas — click a live cell to erase, click empty space to draw, drag
+// to keep going); right-click/drag orbits the camera; scroll zooms.
 // ---------------------------------------------------------------------------
 const Renderer3D = {
-  scene: null, camera: null, renderer: null, mesh: null, edges: null,
+  BUCKET_COUNT: 8,
+  scene: null, camera: null, renderer: null, buckets: null, edges: null, pickBox: null,
   canvas: null,
   size: 0,
-  instanceGridIndex: null, // instance slot -> flat grid index, for click-to-erase picking
   cam: { theta: Math.PI / 4, phi: Math.PI / 3, radius: 0, target: null },
-  dragging: false, lastX: 0, lastY: 0, dragMoved: 0,
+  orbiting: false, painting: false,
+  lastX: 0, lastY: 0,
+  onPaint: null, // (gridIndex, isNewGesture) => void — set by Sim3D; Sim3D decides erase-vs-draw
 
   init(canvas) {
     this.canvas = canvas;
@@ -992,41 +1013,49 @@ const Renderer3D = {
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.1, 2000);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
-    dir.position.set(1, 1.4, 1);
-    this.scene.add(dir);
-    const dir2 = new THREE.DirectionalLight(0x88aaff, 0.35);
-    dir2.position.set(-1, -0.6, -1);
-    this.scene.add(dir2);
-
+    // Unlit materials throughout — flat, vivid color exactly as sampled,
+    // matching how the 2D canvas shows raw RGB with no lighting model.
     this.cam.target = new THREE.Vector3(0, 0, 0);
     this.attachCameraControls(canvas);
   },
 
-  // Rebuilds the instanced mesh + bounding box for a new cube size.
+  // Rebuilds the bucket meshes + picking box + bounding box for a new cube size.
   setSize(size) {
     this.size = size;
-    if (this.mesh) { this.scene.remove(this.mesh); this.mesh.geometry.dispose(); this.mesh.material.dispose(); }
+    if (this.buckets) {
+      for (const b of this.buckets) { this.scene.remove(b.mesh); b.mesh.material.dispose(); }
+      this.sharedGeo.dispose();
+    }
     if (this.edges) { this.scene.remove(this.edges); this.edges.geometry.dispose(); this.edges.material.dispose(); }
+    if (this.pickBox) { this.scene.remove(this.pickBox); this.pickBox.geometry.dispose(); this.pickBox.material.dispose(); }
 
     const maxN = size * size * size;
-    const geo = new THREE.BoxGeometry(0.85, 0.85, 0.85);
-    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.05 });
-    this.mesh = new THREE.InstancedMesh(geo, mat, maxN);
-    this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(maxN * 3), 3);
-    this.mesh.count = 0;
-    this.scene.add(this.mesh);
-    this.instanceGridIndex = new Int32Array(maxN);
+    this.sharedGeo = new THREE.BoxGeometry(0.85, 0.85, 0.85);
+    this.buckets = [];
+    for (let i = 0; i < this.BUCKET_COUNT; i++) {
+      const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+      const mesh = new THREE.InstancedMesh(this.sharedGeo, mat, maxN);
+      mesh.count = 0;
+      const gridIndex = new Int32Array(maxN);
+      mesh.userData.gridIndex = gridIndex;
+      this.scene.add(mesh);
+      this.buckets.push({ mesh, gridIndex, count: 0 });
+    }
 
-    const boxGeo = new THREE.BoxGeometry(size, size, size);
+    // Invisible box used only so raycasting has something to hit in empty
+    // space (to know where to draw a NEW cell) — material.visible:false
+    // hides it from rendering without excluding it from raycasts.
+    const pickGeo = new THREE.BoxGeometry(size, size, size);
+    this.pickBox = new THREE.Mesh(pickGeo, new THREE.MeshBasicMaterial({ visible: false }));
+    this.scene.add(this.pickBox);
+
+    const edgeGeo = new THREE.BoxGeometry(size, size, size);
     this.edges = new THREE.LineSegments(
-      new THREE.EdgesGeometry(boxGeo),
-      new THREE.LineBasicMaterial({ color: 0x2a2f3a, transparent: true, opacity: 0.6 })
+      new THREE.EdgesGeometry(edgeGeo),
+      new THREE.LineBasicMaterial({ color: 0x3a4050, transparent: true, opacity: 0.7 })
     );
     this.scene.add(this.edges);
-    boxGeo.dispose();
+    edgeGeo.dispose();
 
     this.cam.radius = size * 1.9;
     this.resetCamera();
@@ -1038,40 +1067,54 @@ const Renderer3D = {
     this.cam.radius = this.size * 1.9;
   },
 
-  // Pushes alive cells (with age-based palette color) into the instanced
-  // mesh. Called only when the sim actually steps/changes — not every frame.
+  // Pushes alive cells into their age-bucket mesh. Called only when the sim
+  // actually steps/changes — not every frame.
   draw(state, paletteKey, ageDivisor) {
     const size = state.size;
     const { cells, ages } = state;
     const palette = Palettes[paletteKey] || Palettes.mono;
     const half = (size - 1) / 2;
     const dummy = new THREE.Object3D();
-    let count = 0;
+    const BC = this.BUCKET_COUNT;
+
+    // Recolor each bucket's flat material from the current palette. A 0.3
+    // floor keeps freshly-born cells (t=0) well clear of a palette's
+    // darkest stop — with no lighting to help, a cell rendered at the
+    // literal darkest stop reads as invisible against the black backdrop.
+    for (let b = 0; b < BC; b++) {
+      const t = 0.3 + ((b + 0.5) / BC) * 0.7;
+      const [r, g, b2] = sampleGradient(palette.stops, t);
+      this.buckets[b].mesh.material.color.setRGB(r / 255, g / 255, b2 / 255);
+      this.buckets[b].count = 0;
+    }
+
     const n = size * size * size;
     for (let i = 0; i < n; i++) {
       if (!cells[i]) continue;
       const z = Math.floor(i / (size * size));
       const y = Math.floor((i - z * size * size) / size);
       const x = i - z * size * size - y * size;
+      const rawT = Math.min(ages[i] / ageDivisor, 1);
+      let bIdx = Math.floor(rawT * BC);
+      if (bIdx >= BC) bIdx = BC - 1;
+      const bucket = this.buckets[bIdx];
       dummy.position.set(x - half, y - half, z - half);
       dummy.updateMatrix();
-      this.mesh.setMatrixAt(count, dummy.matrix);
-      const t = Math.min(ages[i] / ageDivisor, 1);
-      const [r, g, b] = sampleGradient(palette.stops, t);
-      this.mesh.setColorAt(count, new THREE.Color(r / 255, g / 255, b / 255));
-      this.instanceGridIndex[count] = i;
-      count++;
+      bucket.mesh.setMatrixAt(bucket.count, dummy.matrix);
+      bucket.gridIndex[bucket.count] = i;
+      bucket.count++;
     }
-    this.mesh.count = count;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    for (let b = 0; b < BC; b++) {
+      this.buckets[b].mesh.count = this.buckets[b].count;
+      this.buckets[b].mesh.instanceMatrix.needsUpdate = true;
+    }
   },
 
   handleResize() {
     const stage = document.getElementById('stage');
     const w = stage.clientWidth, h = stage.clientHeight;
     if (!w || !h) return;
-    this.renderer.setSize(w, h, false);
+    this.renderer.setSize(w, h); // updateStyle defaults to true — sets canvas.style size to match the container
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   },
@@ -1087,25 +1130,65 @@ const Renderer3D = {
     this.renderer.render(this.scene, this.camera);
   },
 
-  // Manual orbit (drag to rotate, wheel to zoom) plus click-to-erase picking
-  // via raycasting against the instanced mesh's recorded grid indices.
+  // Converts a hit point + face normal on the (invisible) bounding box into
+  // the grid cell just inside that face — i.e. "which surface cell did the
+  // user point at in empty space".
+  surfaceCellFromHit(point, normal, size) {
+    const half = (size - 1) / 2;
+    const idx = (v) => Math.max(0, Math.min(size - 1, Math.round(v + half)));
+    let x, y, z;
+    if (Math.abs(normal.x) > 0.5) { x = normal.x > 0 ? size - 1 : 0; y = idx(point.y); z = idx(point.z); }
+    else if (Math.abs(normal.y) > 0.5) { y = normal.y > 0 ? size - 1 : 0; x = idx(point.x); z = idx(point.z); }
+    else { z = normal.z > 0 ? size - 1 : 0; x = idx(point.x); y = idx(point.y); }
+    return x + y * size + z * size * size;
+  },
+
+  // Raycasts from a mouse event; returns a grid flat-index, preferring the
+  // nearest EXISTING live cell along the ray (so clicking through empty
+  // space in front of a voxel still reaches it), falling back to the
+  // bounding-box surface (for drawing into empty space) if none is hit.
+  pick(evt) {
+    const rect = this.canvas.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((evt.clientX - rect.left) / rect.width) * 2 - 1,
+      -((evt.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(mouse, this.camera);
+    const targets = this.buckets.map(b => b.mesh).concat([this.pickBox]);
+    const hits = ray.intersectObjects(targets, false);
+    const cellHit = hits.find(h => h.object.userData && h.object.userData.gridIndex);
+    if (cellHit) return cellHit.object.userData.gridIndex[cellHit.instanceId];
+    const boxHit = hits.find(h => h.object === this.pickBox);
+    if (boxHit) return this.surfaceCellFromHit(boxHit.point, boxHit.face.normal, this.size);
+    return null;
+  },
+
   attachCameraControls(canvas) {
     const onDown = (e) => {
-      this.dragging = true; this.dragMoved = 0;
-      this.lastX = e.clientX; this.lastY = e.clientY;
+      if (e.button === 2) {
+        this.orbiting = true;
+        this.lastX = e.clientX; this.lastY = e.clientY;
+      } else if (e.button === 0) {
+        const gridIndex = this.pick(e);
+        if (gridIndex == null || !this.onPaint) return;
+        this.painting = true;
+        this.onPaint(gridIndex, true); // true = start of a new paint gesture
+      }
     };
     const onMove = (e) => {
-      if (!this.dragging) return;
-      const dx = e.clientX - this.lastX, dy = e.clientY - this.lastY;
-      this.dragMoved += Math.abs(dx) + Math.abs(dy);
-      this.cam.theta -= dx * 0.008;
-      this.cam.phi = Math.max(0.08, Math.min(Math.PI - 0.08, this.cam.phi - dy * 0.008));
-      this.lastX = e.clientX; this.lastY = e.clientY;
+      if (this.orbiting) {
+        const dx = e.clientX - this.lastX, dy = e.clientY - this.lastY;
+        this.cam.theta -= dx * 0.008;
+        this.cam.phi = Math.max(0.08, Math.min(Math.PI - 0.08, this.cam.phi - dy * 0.008));
+        this.lastX = e.clientX; this.lastY = e.clientY;
+      } else if (this.painting) {
+        const gridIndex = this.pick(e);
+        if (gridIndex != null && this.onPaint) this.onPaint(gridIndex, false); // continuing the same gesture
+      }
     };
-    const onUp = (e) => {
-      if (this.dragging && this.dragMoved < 4) this.tryErase(e); // treat as a click, not a drag
-      this.dragging = false;
-    };
+    const onUp = () => { this.orbiting = false; this.painting = false; };
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('mousedown', onDown);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -1114,22 +1197,6 @@ const Renderer3D = {
       const min = this.size * 0.6, max = this.size * 5;
       this.cam.radius = Math.max(min, Math.min(max, this.cam.radius * (1 + e.deltaY * 0.001)));
     }, { passive: false });
-  },
-
-  tryErase(evt) {
-    if (!this.onErase || this.mesh.count === 0) return;
-    const rect = this.canvas.getBoundingClientRect();
-    const mouse = new THREE.Vector2(
-      ((evt.clientX - rect.left) / rect.width) * 2 - 1,
-      -((evt.clientY - rect.top) / rect.height) * 2 + 1
-    );
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(mouse, this.camera);
-    const hit = ray.intersectObject(this.mesh);
-    if (hit.length && hit[0].instanceId != null) {
-      const gridIndex = this.instanceGridIndex[hit[0].instanceId];
-      this.onErase(gridIndex);
-    }
   }
 };
 
@@ -1522,21 +1589,41 @@ const Sim3D = {
   stepsPerSec: 6,
   accumulator: 0,
   lastTime: 0,
+  brush: 1,        // brush radius, in cells
+  paintErase: false, // decided at the start of each drag gesture; held for its duration
 
   // Lazily constructed on first switch to 3D mode — avoids paying for a
   // WebGL context / Three.js scene for anyone who never opens 3D mode.
   init() {
     this.initialized = true;
     Renderer3D.init(document.getElementById('view3d'));
-    Renderer3D.onErase = (gridIndex) => {
-      this.state.cells[gridIndex] = 0;
-      this.state.ages[gridIndex] = 0;
-      this.redraw();
-    };
+    Renderer3D.onPaint = (gridIndex, isStart) => this.paintAt(gridIndex, isStart);
     this.setSize(this.size);
     this.randomize(12);
     wireUI3D();
     requestAnimationFrame((t) => this.loop(t));
+  },
+
+  // Applies the brush at a flat grid index. `isStart` marks the first call
+  // of a drag gesture — that's when erase-vs-draw gets decided (by whether
+  // the targeted cell is currently alive), then held for the rest of the
+  // drag, exactly like the 2D canvas's brush.
+  paintAt(gridIndex, isStart) {
+    const s = this.state, size = s.size;
+    const z = Math.floor(gridIndex / (size * size));
+    const y = Math.floor((gridIndex - z * size * size) / size);
+    const x = gridIndex - z * size * size - y * size;
+    if (isStart) this.paintErase = s.get(x, y, z) !== 0;
+    const v = this.paintErase ? 0 : 1;
+    const r = this.brush - 1;
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (dx * dx + dy * dy + dz * dz <= r * r + 0.5) s.set(x + dx, y + dy, z + dz, v);
+        }
+      }
+    }
+    this.redraw();
   },
 
   setSize(size) {
@@ -1695,7 +1782,16 @@ function setMode(mode) {
   });
 
   if (mode === '3d') {
-    if (!Sim3D.initialized) Sim3D.init(); // first visit: build the Three.js scene
+    if (!Sim3D.initialized) {
+      try {
+        Sim3D.init(); // first visit: build the Three.js scene
+      } catch (err) {
+        console.error('3D mode failed to initialize:', err);
+        document.getElementById('panel3D').innerHTML =
+          '<div class="group" style="border-bottom:none;"><p class="hint" style="color:var(--danger);">3D mode failed to load — check your internet connection (it needs to fetch three.js) and the browser console for details.</p></div>';
+        return;
+      }
+    }
     // The canvas was display:none until just now, so it had zero size —
     // resize once it's actually visible, then keep it in sync going forward.
     requestAnimationFrame(() => Renderer3D.handleResize());
@@ -2101,6 +2197,10 @@ function wireUI3D() {
 
   // Camera
   $('resetCamera3DBtn').addEventListener('click', () => Renderer3D.resetCamera());
+  $('brush3DSlider').addEventListener('input', (e) => {
+    Sim3D.brush = Number(e.target.value);
+    $('brush3DVal').textContent = e.target.value;
+  });
 
   // Save / load / share (parallels the 2D versions, tagged mode:'3d')
   $('save3DStateBtn').addEventListener('click', () => {
